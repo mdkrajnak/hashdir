@@ -1,34 +1,28 @@
 package main
 
 import (
-	"crypto/sha256"
-	"crypto/sha512"
-	"encoding/hex"
 	"flag"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
-)
 
-// FileHash stores the filename and its corresponding hash
-type FileHash struct {
-	Name string
-	Hash string
-}
+	hashgen "hashdir/hashgen"
+)
 
 // Command line flags
 var (
-	dirPath   string
-	useSHA512 bool
+	leftDirPath  string
+	rightDirPath string
+	useSHA512    bool
 )
 
 func init() {
 	// Define both short and long forms of flags
-	flag.StringVar(&dirPath, "dir", ".", "Directory path to scan")
-	flag.StringVar(&dirPath, "d", ".", "Directory path to scan (shorthand)")
+	flag.StringVar(&leftDirPath, "left", ".", "Left directory path to scan")
+	flag.StringVar(&leftDirPath, "l", ".", "Left directory path to scan (shorthand)")
+
+	flag.StringVar(&rightDirPath, "right", ".", "Right directory path to scan")
+	flag.StringVar(&rightDirPath, "r", ".", "Right directory path to scan (shorthand)")
 
 	flag.BoolVar(&useSHA512, "sha512", false, "Use SHA512 instead of SHA256")
 	flag.BoolVar(&useSHA512, "s", false, "Use SHA512 instead of SHA256 (shorthand)")
@@ -37,7 +31,8 @@ func init() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nFlags:\n")
-		fmt.Fprintf(os.Stderr, "  -d, --dir string\n\tDirectory path to scan (default \".\")\n")
+		fmt.Fprintf(os.Stderr, "  -l, --left string\n\tLeft directory path to scan (default \".\")\n")
+		fmt.Fprintf(os.Stderr, "  -r, --right string\n\tRight directory path to scan (default \".\")\n")
 		fmt.Fprintf(os.Stderr, "  -s, --sha512\n\tUse SHA512 instead of SHA256\n")
 	}
 }
@@ -47,51 +42,28 @@ func main() {
 	processArgs()
 	flag.Parse()
 
-	// Get list of files in directory
-	files, err := os.ReadDir(dirPath)
+	// Generate file hashes for both directories
+	leftFileHashes, err := hashgen.GenerateFileHashes(leftDirPath, useSHA512)
 	if err != nil {
-		fmt.Printf("Error reading directory: %v\n", err)
+		fmt.Printf("Error generating file hashes for left directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Create slice to store file hashes
-	var fileHashes []FileHash
-
-	// Process each file
-	for _, file := range files {
-		// Skip directories
-		if file.IsDir() {
-			continue
-		}
-
-		fullPath := filepath.Join(dirPath, file.Name())
-		hash, err := computeHash(fullPath, useSHA512)
-		if err != nil {
-			fmt.Printf("Error computing hash for %s: %v\n", file.Name(), err)
-			continue
-		}
-
-		fileHashes = append(fileHashes, FileHash{
-			Name: file.Name(),
-			Hash: hash,
-		})
+	rightFileHashes, err := hashgen.GenerateFileHashes(rightDirPath, useSHA512)
+	if err != nil {
+		fmt.Printf("Error generating file hashes for right directory: %v\n", err)
+		os.Exit(1)
 	}
 
-	// Sort fileHashes by filename
-	sort.Slice(fileHashes, func(i, j int) bool {
-		return fileHashes[i].Name < fileHashes[j].Name
-	})
+	// Compare file hashes
+	identicalFiles, differentFiles, leftOnlyFiles, rightOnlyFiles := compareFileHashes(leftFileHashes, rightFileHashes)
 
 	// Print results
-	hashType := "SHA256"
-	if useSHA512 {
-		hashType = "SHA512"
-	}
-	fmt.Printf("\nFile Hashes (%s):\n", hashType)
-	fmt.Println("----------------------------------------")
-	for _, fh := range fileHashes {
-		fmt.Printf("%s: %s\n", fh.Name, fh.Hash)
-	}
+	fmt.Printf("\nComparison Results:\n")
+	fmt.Printf("Identical Files: %d\n", identicalFiles)
+	fmt.Printf("Different Files: %d\n", differentFiles)
+	fmt.Printf("Files only in left directory: %d\n", leftOnlyFiles)
+	fmt.Printf("Files only in right directory: %d\n", rightOnlyFiles)
 }
 
 // processArgs converts --flag style args to -flag style
@@ -103,27 +75,42 @@ func processArgs() {
 	}
 }
 
-func computeHash(filePath string, useSHA512 bool) (string, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	var hash string
-	if useSHA512 {
-		hasher := sha512.New()
-		if _, err := io.Copy(hasher, file); err != nil {
-			return "", err
-		}
-		hash = hex.EncodeToString(hasher.Sum(nil))
-	} else {
-		hasher := sha256.New()
-		if _, err := io.Copy(hasher, file); err != nil {
-			return "", err
-		}
-		hash = hex.EncodeToString(hasher.Sum(nil))
+// compareFileHashes compares two slices of FileHash and returns detailed comparison results
+func compareFileHashes(left, right []hashgen.FileHash) (int, int, int, int) {
+	leftMap := make(map[string]string)
+	for _, fh := range left {
+		leftMap[fh.Name] = fh.Hash
 	}
 
-	return hash, nil
+	rightMap := make(map[string]string)
+	for _, fh := range right {
+		rightMap[fh.Name] = fh.Hash
+	}
+
+	identicalFiles := 0
+	differentFiles := 0
+	leftOnlyFiles := 0
+	rightOnlyFiles := 0
+
+	// Check files in the left directory
+	for name, leftHash := range leftMap {
+		if rightHash, exists := rightMap[name]; exists {
+			if leftHash == rightHash {
+				identicalFiles++
+			} else {
+				differentFiles++
+			}
+		} else {
+			leftOnlyFiles++
+		}
+	}
+
+	// Check files in the right directory that are not in the left directory
+	for name := range rightMap {
+		if _, exists := leftMap[name]; !exists {
+			rightOnlyFiles++
+		}
+	}
+
+	return identicalFiles, differentFiles, leftOnlyFiles, rightOnlyFiles
 }
